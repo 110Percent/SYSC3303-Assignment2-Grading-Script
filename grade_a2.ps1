@@ -31,5 +31,21 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
     exit 1
 }
 
+# Ensure pywinpty is present for better Windows pseudo-terminal behavior.
+# If install fails, grade_a2.py will fall back to pipe-based behavior.
+& $pythonExe -c "import winpty" *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "pywinpty not found. Installing with pip..."
+    & $pythonExe -m pip install --user pywinpty
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Could not install pywinpty; continuing with built-in fallback."
+    } else {
+        & $pythonExe -c "import winpty" *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "pywinpty install completed but import still fails; continuing with fallback."
+        }
+    }
+}
+
 & $pythonExe "$scriptDir\grade_a2.py" --root $Root --keep-logs @ExtraArgs
 exit $LASTEXITCODE

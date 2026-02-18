@@ -171,6 +171,12 @@ def wait_for_log(pattern: str, logfile: pathlib.Path, timeout: float) -> bool:
 
 if IS_WINDOWS:
     import queue as _queue
+    try:
+        from winpty import PtyProcess as _PywinptyProcess
+        _HAS_PYWINPTY = True
+    except Exception:
+        _PywinptyProcess = None
+        _HAS_PYWINPTY = False
 
     class _WinPty:
         """Windows substitute for a Unix pseudo-terminal (uses subprocess pipes)."""
@@ -214,6 +220,88 @@ if IS_WINDOWS:
             except Exception:
                 pass
 
+    class _PyWinPty:
+        """Windows pseudo-terminal backed by pywinpty (if installed)."""
+
+        def __init__(self, pty_proc) -> None:
+            self._pty = pty_proc
+            self._q: _queue.Queue[bytes] = _queue.Queue()
+            self._closed = False
+            threading.Thread(target=self._reader, daemon=True).start()
+
+        def _reader(self) -> None:
+            while not self._closed:
+                try:
+                    chunk = self._pty.read()
+                except EOFError:
+                    break
+                except Exception:
+                    break
+                if not chunk:
+                    continue
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", errors="replace")
+                self._q.put(chunk)
+
+        def read(self, timeout: float = 0.2) -> bytes:
+            try:
+                return self._q.get(timeout=timeout)
+            except _queue.Empty:
+                return b""
+
+        def write(self, s: str) -> None:
+            if self._closed:
+                return
+            try:
+                self._pty.write(s)
+            except Exception:
+                pass
+
+        def close(self) -> None:
+            self._closed = True
+            try:
+                self._pty.close(force=True)
+            except TypeError:
+                try:
+                    self._pty.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    class _PyWinPtyProcAdapter:
+        """Duck-typed process adapter so graceful_stop can treat pywinpty like Popen."""
+
+        def __init__(self, pty_proc) -> None:
+            self._pty = pty_proc
+
+        def poll(self):
+            try:
+                if self._pty.isalive():
+                    return None
+            except Exception:
+                return None
+            try:
+                return self._pty.exitstatus
+            except Exception:
+                return 0
+
+        def terminate(self) -> None:
+            try:
+                self._pty.close(force=False)
+            except TypeError:
+                self._pty.close()
+            except Exception:
+                pass
+
+        def kill(self) -> None:
+            try:
+                self._pty.close(force=True)
+            except TypeError:
+                self._pty.close()
+            except Exception:
+                pass
+
 
 def spawn_with_pty(cmd: list[str], cwd: pathlib.Path):
     """Spawn a process attached to a pseudo-terminal; returns (proc, pty_handle).
@@ -222,6 +310,15 @@ def spawn_with_pty(cmd: list[str], cwd: pathlib.Path):
     On Windows the pty_handle is a _WinPty instance backed by subprocess pipes.
     """
     if IS_WINDOWS:
+        if _HAS_PYWINPTY and _PywinptyProcess is not None:
+            try:
+                pty_proc = _PywinptyProcess.spawn(cmd, cwd=str(cwd))
+            except TypeError:
+                # Compatibility fallback for pywinpty builds that only accept cmdline.
+                cmdline = subprocess.list2cmdline(cmd)
+                pty_proc = _PywinptyProcess.spawn(cmdline)
+            return _PyWinPtyProcAdapter(pty_proc), _PyWinPty(pty_proc)
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
@@ -259,6 +356,9 @@ def read_pty(master_fd, timeout: float = 0.2) -> bytes:
 
 def write_pty(master_fd, s: str) -> None:
     if IS_WINDOWS:
+        # Fix CRLF requirement
+        s = s.replace("\r\n", "\n").replace("\n", "\r\n")
+    if IS_WINDOWS and hasattr(master_fd, "write"):
         master_fd.write(s)
     else:
         os.write(master_fd, s.encode("utf-8", errors="replace"))
@@ -381,7 +481,7 @@ def check_diagrams(root: pathlib.Path) -> list[tuple[bool, str, str]]:
     results: list[tuple[bool, str, str]] = []
 
     all_diag = [
-        p for p in root.rglob("*") if p.suffix.lower() in DIAGRAM_EXTS and p.is_file()
+        p for p in root.rglob("*") if p.suffix.lower() in DIAGRAM_EXTS and p.is_file() and '__MACOSX' not in p.parts
     ]
 
     class_hits = [p for p in all_diag if re.search(r"class", p.stem, re.I)]
@@ -922,13 +1022,14 @@ def open_file(path: pathlib.Path) -> None:
 def open_diagrams(root: pathlib.Path) -> None:
     """Find class / sequence diagrams and open them in the default viewer."""
     all_diag = [
-        p for p in root.rglob("*") if p.suffix.lower() in DIAGRAM_EXTS and p.is_file()
+        p for p in root.rglob("*") if p.suffix.lower() in DIAGRAM_EXTS and p.is_file() and '__MACOSX' not in p.parts
     ]
     class_hits = [p for p in all_diag if re.search(r"class", p.stem, re.I)]
     seq_hits = [p for p in all_diag if re.search(r"seq(uence)?", p.stem, re.I)]
     opened: list[pathlib.Path] = []
     for hits in (class_hits, seq_hits):
         if hits:
+            print(hits[0].absolute())
             open_file(hits[0])
             opened.append(hits[0])
     if opened:
