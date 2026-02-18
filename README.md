@@ -1,5 +1,7 @@
 # SYSC3303A W26 A2 Grading Script Instructions
 
+Note: The results from this script should not, under any circumstances, be used to "auto-grade" assignments. Use this as a reference only.
+
 ## Requirements
 
 - Python 3.8+
