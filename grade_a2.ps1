@@ -1,17 +1,19 @@
-# grade_a2.ps1 — Windows wrapper for the rubric-oriented E2E test.
+# grade_a2.ps1 - Windows wrapper for single-submission and bulk A2 grading.
 # Requires Python 3 to be on PATH (installed from python.org or via the
-# Microsoft Store — both register the 'python' / 'py' launchers).
+# Microsoft Store - both register the 'python' / 'py' launchers).
 #
 # Usage:
-#   .\grade_a2.ps1 [submission_dir] [extra args...]
+#   Single submission: .\grade_a2.ps1 [submission_dir] [extra args...]
+#   Bulk evaluation:   .\grade_a2.ps1 -Bulk [bulk_root] [extra args...]
 #
 # Examples:
 #   .\grade_a2.ps1 .
 #   $env:MAIN_SERVER="Server"; $env:MAIN_HOST="IntermediateHost"; $env:MAIN_CLIENT="Client"; .\grade_a2.ps1 .
 #   $env:JAVA_OPTS="-Xmx256m"; $env:TIMEOUT_SECONDS="35"; .\grade_a2.ps1 .
-#   .\grade_a2.ps1 . --seed 123 --no-color
+#   .\grade_a2.ps1 -Bulk "D:\exports\a2" --report ".\bulk_report.html"
 
 param(
+    [switch]$Bulk,
     [string]$Root = ".",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs = @()
@@ -47,5 +49,9 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-& $pythonExe "$scriptDir\grade_a2.py" --root $Root --keep-logs @ExtraArgs
+if ($Bulk) {
+    & $pythonExe "$scriptDir\grade_a2_bulk.py" --bulk-root $Root @ExtraArgs
+} else {
+    & $pythonExe "$scriptDir\grade_a2.py" --root $Root --keep-logs @ExtraArgs
+}
 exit $LASTEXITCODE

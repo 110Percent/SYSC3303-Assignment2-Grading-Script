@@ -31,6 +31,28 @@ python3 grade_a2.py --root /path/to/submission
 
 If no path is provided, the current directory is used as the submission root.
 
+## Bulk Evaluation
+
+Use `grade_a2_bulk.py` to process a Brightspace-style bulk export folder where each
+submission is a subfolder named like:
+
+`<two-part-submission-id> - <name> <student number>- <submission date>`
+
+and contains a `.zip` submission file.
+
+```bash
+python3 grade_a2_bulk.py --bulk-root /path/to/bulk-folder
+```
+
+By default this writes `bulk_evaluation_report.html` in the current directory and
+updates it after each submission completes.
+
+Common options:
+
+- `--report /path/to/report.html` to choose report output path.
+- `--work-dir /path/to/temp-work` to choose extraction workspace.
+- `--keep-extracted` to keep extracted submission folders after grading.
+
 ## Overriding Main Class Names
 
 If the script cannot auto-detect `Client`, `IntermediateHost`, or `Server`, set these environment variables before running:

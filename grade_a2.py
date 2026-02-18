@@ -24,6 +24,7 @@ import pathlib
 import shutil
 import random
 import threading
+from dataclasses import dataclass
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -96,6 +97,39 @@ def random_player_name() -> str:
 # Diagram extensions we recognise
 DIAGRAM_EXTS = {".drawio", ".png", ".jpg", ".jpeg", ".svg", ".pdf"}
 
+CheckResult = tuple[bool, str, str]
+SectionResults = dict[str, list[CheckResult]]
+
+
+@dataclass
+class GradeRunResult:
+    root: str
+    logs_dir: str
+    build_dir: str
+    all_results: SectionResults
+    passed_checks: int
+    total_checks: int
+    overall_ok: bool
+    return_code: int
+
+    def to_dict(self) -> dict[str, object]:
+        sections: dict[str, list[dict[str, object]]] = {}
+        for section_name, items in self.all_results.items():
+            sections[section_name] = [
+                {"passed": passed, "label": label, "detail": detail}
+                for passed, label, detail in items
+            ]
+        return {
+            "root": self.root,
+            "logs_dir": self.logs_dir,
+            "build_dir": self.build_dir,
+            "passed_checks": self.passed_checks,
+            "total_checks": self.total_checks,
+            "overall_ok": self.overall_ok,
+            "return_code": self.return_code,
+            "sections": sections,
+        }
+
 
 # Recursively find relevant .java files
 def get_java_files(root: pathlib.Path, exclude_gamestate=True) -> list[pathlib.Path]:
@@ -105,8 +139,9 @@ def get_java_files(root: pathlib.Path, exclude_gamestate=True) -> list[pathlib.P
     java_files = [
         p
         for p in java_files
-        if not any(part.startswith(".") or part == "__MACOSX" for part in p.parts)
+        if not any(part == "__MACOSX" for part in p.parts)
         and (not exclude_gamestate or p.name != "GameState.java")
+        and not (p.name.startswith("Test") or p.name.endswith("Test.java"))
     ]
     return java_files
 
@@ -443,7 +478,7 @@ def discover_main_classes(root: pathlib.Path) -> dict[str, str]:
                 continue
             if "public static void main" not in txt:
                 continue
-            for m in re.finditer(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b", txt):
+            for m in re.finditer(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)\b", txt, flags=re.MULTILINE):
                 mains.append(m.group(1))
                 break
 
@@ -484,7 +519,7 @@ def check_diagrams(root: pathlib.Path) -> list[tuple[bool, str, str]]:
         p for p in root.rglob("*") if p.suffix.lower() in DIAGRAM_EXTS and p.is_file() and '__MACOSX' not in p.parts
     ]
 
-    class_hits = [p for p in all_diag if re.search(r"class", p.stem, re.I)]
+    class_hits = [p for p in all_diag if re.search(r"(class|uml)", p.stem, re.I)]
     seq_hits = [p for p in all_diag if re.search(r"seq(uence)?", p.stem, re.I)]
 
     if class_hits:
@@ -567,7 +602,7 @@ _METHOD_PAT = re.compile(
     r"[\w<>\[\]]+\s+\w+\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{",
     re.MULTILINE,
 )
-_CLASS_PAT = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)")
+_CLASS_PAT = re.compile(r"^public class\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
 
 MAX_METHOD_LINES = 80  # methods longer than this are flagged
 MAX_METHODS_CLASS = 15  # more than this per class → possible god-class
@@ -639,15 +674,15 @@ def check_code_quality(root: pathlib.Path) -> list[tuple[bool, str, str]]:
     _host_aliases_code = {"IntermediateHost": {"IntermediateHost", "Host"}}
     for req in sorted(["Client", "IntermediateHost", "Server"]):
         accepted = _host_aliases_code.get(req, {req})
-        found = bool(accepted & found_classes)
+        matched = [s for s in stats_list if s.class_name in accepted]
+        found = bool(matched)
         display = req
-        results.append(
-            (
-                found,
-                f"Source file present: {display}",
-                f"No class named '{display}' (or alias) found" if not found else "",
-            )
-        )
+        if found:
+            chosen = sorted(matched, key=lambda s: str(s.path))[0]
+            detail = str(chosen.path.relative_to(root))
+        else:
+            detail = f"No class named '{display}' (or alias) found"
+        results.append((found, f"Source file present: {display}", detail))
 
     # (b) JavaDoc present in every class
     for s in stats_list:
@@ -1029,7 +1064,6 @@ def open_diagrams(root: pathlib.Path) -> None:
     opened: list[pathlib.Path] = []
     for hits in (class_hits, seq_hits):
         if hits:
-            print(hits[0].absolute())
             open_file(hits[0])
             opened.append(hits[0])
     if opened:
@@ -1038,22 +1072,42 @@ def open_diagrams(root: pathlib.Path) -> None:
         log(f"  {INFO_ICON} No diagram files found to open")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="SYSC3303 A2 grader")
-    ap.add_argument("--root", default=".", help="Submission root directory")
-    ap.add_argument(
-        "--keep-logs",
-        action="store_true",
-        help="Keep .a2_build / .a2_logs directories after run",
-    )
-    ap.add_argument(
-        "--no-open-diagrams",
-        action="store_true",
-        help="Skip automatically opening diagram files in the default viewer",
-    )
-    args = ap.parse_args()
+def _count_totals(all_results: SectionResults) -> tuple[int, int]:
+    passed = 0
+    total = 0
+    for items in all_results.values():
+        passed += sum(1 for p, _, _ in items if p)
+        total += len(items)
+    return passed, total
 
-    root = pathlib.Path(args.root).resolve()
+
+def _build_run_result(
+    root: pathlib.Path,
+    build: pathlib.Path,
+    logs: pathlib.Path,
+    all_results: SectionResults,
+) -> GradeRunResult:
+    passed, total = _count_totals(all_results)
+    overall_ok = all(p for items in all_results.values() for p, _, _ in items)
+    return GradeRunResult(
+        root=str(root),
+        logs_dir=str(logs),
+        build_dir=str(build),
+        all_results=all_results,
+        passed_checks=passed,
+        total_checks=total,
+        overall_ok=overall_ok,
+        return_code=0 if overall_ok else 1,
+    )
+
+
+def grade_submission(
+    root: str | pathlib.Path = ".",
+    *,
+    keep_logs: bool = False,
+    no_open_diagrams: bool = False,
+) -> GradeRunResult:
+    root = pathlib.Path(root).resolve()
     if not root.exists():
         raise RuntimeError(f"Root not found: {root}")
 
@@ -1063,13 +1117,13 @@ def main() -> int:
         shutil.rmtree(logs, ignore_errors=True)
     logs.mkdir(parents=True, exist_ok=True)
 
-    all_results: dict[str, list[tuple[bool, str, str]]] = {}
+    all_results: SectionResults = {}
 
     # ── 1. Diagrams ───────────────────────────────────────────────────────────
     section("1 · DIAGRAMS")
     diag = check_diagrams(root)
     all_results["Diagrams"] = diag
-    if not args.no_open_diagrams:
+    if not no_open_diagrams:
         open_diagrams(root)
 
     # ── 2. Code Quality ───────────────────────────────────────────────────────
@@ -1092,7 +1146,7 @@ def main() -> int:
         print_detailed_results(all_results)
         section("FINAL SUMMARY")
         print_summary(all_results)
-        return 1
+        return _build_run_result(root, build, logs, all_results)
 
     # ── 4. E2E ────────────────────────────────────────────────────────────────
     section("4 · END-TO-END TEST  (Client <-> IntermediateHost <-> Server)")
@@ -1104,7 +1158,7 @@ def main() -> int:
         print_detailed_results(all_results)
         section("FINAL SUMMARY")
         print_summary(all_results)
-        return 1
+        return _build_run_result(root, build, logs, all_results)
 
     log(f"  {INFO_ICON} Player name randomised each run")
     log(
@@ -1123,12 +1177,33 @@ def main() -> int:
     section("FINAL SUMMARY")
     print_summary(all_results)
 
-    if not args.keep_logs:
+    if not keep_logs:
         shutil.rmtree(build, ignore_errors=True)
         # Logs are intentionally kept to aid TA review.
 
-    overall_ok = all(p for items in all_results.values() for p, _, _ in items)
-    return 0 if overall_ok else 1
+    return _build_run_result(root, build, logs, all_results)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="SYSC3303 A2 grader")
+    ap.add_argument("--root", default=".", help="Submission root directory")
+    ap.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Keep .a2_build / .a2_logs directories after run",
+    )
+    ap.add_argument(
+        "--no-open-diagrams",
+        action="store_true",
+        help="Skip automatically opening diagram files in the default viewer",
+    )
+    args = ap.parse_args()
+    result = grade_submission(
+        root=args.root,
+        keep_logs=args.keep_logs,
+        no_open_diagrams=args.no_open_diagrams,
+    )
+    return result.return_code
 
 
 if __name__ == "__main__":
